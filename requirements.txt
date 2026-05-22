@@ -1,4 +1,6 @@
 pyTelegramBotAPI
-pymongo[srv]
+pymongo
 apscheduler
 flask
+gunicorn
+dnspython
