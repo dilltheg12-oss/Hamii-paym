@@ -1,4 +1,5 @@
 import os
+import time
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
@@ -6,16 +7,15 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread
-import time
 
 # =========================================
-# KEEP ALIVE WEB SERVER
+# KEEP ALIVE SERVER
 # =========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running successfully!"
+    return "Bot Running Successfully ✅"
 
 def run_web():
     port = int(os.environ.get("PORT", 5000))
@@ -35,6 +35,402 @@ UPI_ID = os.getenv("UPI_ID")
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME")
 
 # =========================================
+# CHECK VARIABLES
+# =========================================
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN Missing")
+
+if not MONGO_URI:
+    raise Exception("MONGO_URI Missing")
+
+# =========================================
+# BOT SETUP
+# =========================================
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# =========================================
+# DATABASE
+# =========================================
+client = MongoClient(MONGO_URI)
+
+db = client["sub_management"]
+
+channels_col = db["channels"]
+users_col = db["users"]
+
+# =========================================
+# START COMMAND
+# =========================================
+@bot.message_handler(commands=['start'])
+def start_handler(message):
+
+    user_id = message.from_user.id
+    args = message.text.split()
+
+    # =====================================
+    # USER JOIN FLOW
+    # =====================================
+    if len(args) > 1:
+
+        try:
+
+            channel_id = int(args[1])
+
+            channel = channels_col.find_one({
+                "channel_id": channel_id
+            })
+
+            if channel:
+
+                markup = InlineKeyboardMarkup()
+
+                for mins, price in channel["plans"].items():
+
+                    mins_int = int(mins)
+
+                    if mins_int < 60:
+                        label = f"{mins_int} Min"
+
+                    elif mins_int < 1440:
+                        label = f"{mins_int // 60} Hours"
+
+                    else:
+                        label = f"{mins_int // 1440} Days"
+
+                    markup.add(
+                        InlineKeyboardButton(
+                            f"💳 {label} - ₹{price}",
+                            callback_data=f"buy_{channel_id}_{mins}"
+                        )
+                    )
+
+                markup.add(
+                    InlineKeyboardButton(
+                        "📞 Contact Admin",
+                        url=f"https://t.me/{CONTACT_USERNAME}"
+                    )
+                )
+
+                bot.send_message(
+                    message.chat.id,
+                    f"🔥 Welcome!\n\n"
+                    f"📢 Channel: {channel['name']}\n\n"
+                    f"Choose a subscription plan below.",
+                    reply_markup=markup
+                )
+
+                return
+
+        except Exception as e:
+            print("Start Error:", e)
+
+    # =====================================
+    # ADMIN PANEL
+    # =====================================
+    if user_id == ADMIN_ID:
+
+        bot.send_message(
+            message.chat.id,
+            "✅ ADMIN PANEL\n\n"
+            "/add - Add Channel\n"
+            "/channels - Show Channels"
+        )
+
+    else:
+
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Invalid Link."
+        )
+
+# =========================================
+# ADD CHANNEL
+# =========================================
+@bot.message_handler(commands=['add'])
+def add_channel(message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    msg = bot.send_message(
+        ADMIN_ID,
+        "📩 Forward any message from your channel."
+    )
+
+    bot.register_next_step_handler(msg, get_channel)
+
+# =========================================
+# GET CHANNEL
+# =========================================
+def get_channel(message):
+
+    if not message.forward_from_chat:
+
+        bot.send_message(
+            ADMIN_ID,
+            "❌ Please forward a channel message."
+        )
+
+        return
+
+    ch_id = message.forward_from_chat.id
+    ch_name = message.forward_from_chat.title
+
+    msg = bot.send_message(
+        ADMIN_ID,
+        "Send plans like:\n\n1440:99,43200:199"
+    )
+
+    bot.register_next_step_handler(
+        msg,
+        save_channel,
+        ch_id,
+        ch_name
+    )
+
+# =========================================
+# SAVE CHANNEL
+# =========================================
+def save_channel(message, ch_id, ch_name):
+
+    try:
+
+        raw = message.text.split(',')
+
+        plans = {}
+
+        for item in raw:
+
+            t, p = item.strip().split(':')
+
+            plans[t] = p
+
+        channels_col.update_one(
+            {
+                "channel_id": ch_id
+            },
+            {
+                "$set": {
+                    "name": ch_name,
+                    "plans": plans,
+                    "admin_id": ADMIN_ID
+                }
+            },
+            upsert=True
+        )
+
+        username = bot.get_me().username
+
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ Channel Saved\n\n"
+            f"https://t.me/{username}?start={ch_id}"
+        )
+
+    except Exception as e:
+
+        print("Save Error:", e)
+
+        bot.send_message(
+            ADMIN_ID,
+            "❌ Invalid Format."
+        )
+
+# =========================================
+# SHOW CHANNELS
+# =========================================
+@bot.message_handler(commands=['channels'])
+def channels(message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    data = channels_col.find({
+        "admin_id": ADMIN_ID
+    })
+
+    text = "📂 Your Channels\n\n"
+
+    for ch in data:
+
+        text += f"• {ch['name']}\n"
+
+    bot.send_message(
+        ADMIN_ID,
+        text
+    )
+
+# =========================================
+# BUY PLAN
+# =========================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
+def buy_plan(call):
+
+    _, ch_id, mins = call.data.split('_')
+
+    channel = channels_col.find_one({
+        "channel_id": int(ch_id)
+    })
+
+    price = channel["plans"][mins]
+
+    qr_url = (
+        f"https://api.qrserver.com/v1/create-qr-code/"
+        f"?size=300x300&data="
+        f"upi://pay?pa={UPI_ID}%26am={price}%26cu=INR"
+    )
+
+    markup = InlineKeyboardMarkup()
+
+    markup.add(
+        InlineKeyboardButton(
+            "✅ I Have Paid",
+            callback_data=f"paid_{ch_id}_{mins}"
+        )
+    )
+
+    bot.send_photo(
+        call.message.chat.id,
+        qr_url,
+        caption=
+        f"💰 Amount: ₹{price}\n"
+        f"🏦 UPI: {UPI_ID}\n\n"
+        f"Pay and click below button.",
+        reply_markup=markup
+    )
+
+# =========================================
+# PAYMENT REQUEST
+# =========================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("paid_"))
+def payment_request(call):
+
+    _, ch_id, mins = call.data.split('_')
+
+    user = call.from_user
+
+    markup = InlineKeyboardMarkup()
+
+    markup.add(
+        InlineKeyboardButton(
+            "✅ Approve",
+            callback_data=f"approve_{user.id}_{ch_id}_{mins}"
+        )
+    )
+
+    bot.send_message(
+        ADMIN_ID,
+        f"🔔 Payment Request\n\n"
+        f"👤 User: {user.first_name}\n"
+        f"🆔 ID: {user.id}\n"
+        f"⏳ Plan: {mins} Minutes",
+        reply_markup=markup
+    )
+
+    bot.send_message(
+        call.message.chat.id,
+        "✅ Request Sent To Admin."
+    )
+
+# =========================================
+# APPROVE USER
+# =========================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_"))
+def approve_user(call):
+
+    try:
+
+        _, user_id, ch_id, mins = call.data.split('_')
+
+        user_id = int(user_id)
+        ch_id = int(ch_id)
+        mins = int(mins)
+
+        expire = datetime.now() + timedelta(minutes=mins)
+
+        link = bot.create_chat_invite_link(
+            ch_id,
+            member_limit=1,
+            expire_date=int(expire.timestamp())
+        )
+
+        users_col.update_one(
+            {
+                "user_id": user_id,
+                "channel_id": ch_id
+            },
+            {
+                "$set": {
+                    "expiry": expire.timestamp()
+                }
+            },
+            upsert=True
+        )
+
+        bot.send_message(
+            user_id,
+            f"🥳 Payment Approved\n\n"
+            f"🔗 Join Link:\n{link.invite_link}"
+        )
+
+        bot.edit_message_text(
+            "✅ User Approved",
+            call.message.chat.id,
+            call.message.message_id
+        )
+
+    except Exception as e:
+
+        print("Approve Error:", e)
+
+# =========================================
+# AUTO REMOVE EXPIRED USERS
+# =========================================
+def remove_expired():
+
+    now = datetime.now().timestamp()
+
+    users = users_col.find({
+        "expiry": {
+            "$lte": now
+        }
+    })
+
+    for user in users:
+
+        try:
+
+            bot.ban_chat_member(
+                user["channel_id"],
+                user["user_id"]
+            )
+
+            bot.unban_chat_member(
+                user["channel_id"],
+                user["user_id"]
+            )
+
+            users_col.delete_one({
+                "_id": user["_id"]
+            })
+
+            print("Expired User Removed")
+
+        except Exception as e:
+
+            print("Remove Error:", e)
+
+# =========================================
+# MAIN
+# =========================================
+if __name__ == "__main__":
+
+    keep_alive()
+
+    scheduler = BackgroundScheduler()
+
+    scheduler.add_job(
+        remove# =========================================
 # TELEGRAM BOT
 # =========================================
 bot = telebot.TeleBot(BOT_TOKEN)
