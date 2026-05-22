@@ -1,6 +1,6 @@
-pyTelegramBotAPI
-pymongo
-apscheduler
-flask
-gunicorn
-dnspython
+pyTelegramBotAPI==4.15.4
+pymongo==4.6.1
+APScheduler==3.10.4
+Flask==3.0.2
+gunicorn==21.2.0
+dnspython==2.6.1
